@@ -1,12 +1,11 @@
-"""Clinical compatibility rules and transparent prototype donor ranking pipeline for BloodLink.
-Prototype weighting: 50% Proximity, 30% Availability, 20% Response Suitability.
-"""
+"""Clinical compatibility rules and explainable donor ranking pipeline for BloodLink."""
 
 from typing import List, Dict, Any, Tuple
 import math
 from datetime import datetime, date
 
-# ABO/Rh compatibility rules for RBC / Whole Blood
+# RBC & Whole Blood Compatibility Matrix
+# Key = Donor Blood Group, Value = Set of recipient blood groups donor can donate RBCs to
 RBC_COMPATIBILITY: Dict[str, set] = {
     "O-": {"O-", "O+", "A-", "A+", "B-", "B+", "AB-", "AB+"},
     "O+": {"O+", "A+", "B+", "AB+"},
@@ -18,7 +17,7 @@ RBC_COMPATIBILITY: Dict[str, set] = {
     "AB+": {"AB+"},
 }
 
-# Plasma compatibility (Reverse ABO rules: AB is universal donor)
+# Plasma Compatibility Matrix (Reverse ABO antibodies: AB is universal donor, O is universal recipient)
 PLASMA_COMPATIBILITY: Dict[str, set] = {
     "AB+": {"AB+", "AB-", "A+", "A-", "B+", "B-", "O+", "O-"},
     "AB-": {"AB+", "AB-", "A+", "A-", "B+", "B-", "O+", "O-"},
@@ -30,94 +29,165 @@ PLASMA_COMPATIBILITY: Dict[str, set] = {
     "O-": {"O+", "O-"},
 }
 
+MIN_DONATION_INTERVAL_DAYS: Dict[str, int] = {
+    "Whole Blood": 56,
+    "Red Blood Cells": 112,
+    "Platelets": 7,
+    "Fresh Frozen Plasma": 28,
+    "Cryoprecipitate": 28,
+}
+
 
 def is_clinically_compatible(donor_group: str, recipient_group: str, component: str = "Whole Blood") -> bool:
-    """Clinical compatibility hard filter."""
+    """Check clinical compatibility based on blood group and blood component."""
     if component == "Fresh Frozen Plasma":
-        return recipient_group in PLASMA_COMPATIBILITY.get(donor_group, set())
-    return recipient_group in RBC_COMPATIBILITY.get(donor_group, set())
+        allowed = PLASMA_COMPATIBILITY.get(donor_group, set())
+        return recipient_group in allowed
+    # Default to RBC rules (for Whole Blood, Platelets, Cryoprecipitate, Red Blood Cells)
+    allowed = RBC_COMPATIBILITY.get(donor_group, set())
+    return recipient_group in allowed
 
 
 def calculate_haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance in kilometers between two GPS coordinates."""
-    r = 6371.0
+    """Calculate approximate great-circle distance between two geographic coordinates in kilometers."""
+    radius_earth_km = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(r * c, 2)
+    return round(radius_earth_km * c, 2)
 
 
-def rank_donor_candidates_prototype(
+def check_donor_interval_eligibility(last_donation_date_str: str | None, component: str = "Whole Blood") -> Tuple[bool, int, str]:
+    """Check whether sufficient time has elapsed since last donation."""
+    if not last_donation_date_str:
+        return True, 999, "First-time or eligible donor (no previous donation recorded within cooldown window)"
+
+    try:
+        last_date = datetime.strptime(last_donation_date_str, "%Y-%m-%d").date()
+    except Exception:
+        return True, 999, "Eligibility date parsing skipped; subject to clinical screening"
+
+    days_since = (date.today() - last_date).days
+    required_interval = MIN_DONATION_INTERVAL_DAYS.get(component, 56)
+
+    if days_since >= required_interval:
+        return True, days_since, f"Eligible: {days_since} days since last donation (minimum interval: {required_interval} days)"
+    else:
+        days_remaining = required_interval - days_since
+        return False, days_since, f"Ineligible interval: {days_remaining} days remaining until safe donation interval ({required_interval} days required)"
+
+
+def rank_donor_candidates(
     request: Dict[str, Any],
     donors: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
-    Prototype matching algorithm with transparent weights:
-    - 50% Proximity (inverse distance relative to travel radius)
-    - 30% Availability (explicitly confirmed status)
-    - 20% Response Suitability (track record & interval readiness)
-    * Hard filter: clinical compatibility cannot be bypassed.
+    Explainable donor ranking pipeline:
+    1. Clinical compatibility filter (hard requirement - cannot be overridden)
+    2. Consent and availability filter
+    3. Interval eligibility requirement
+    4. Distance evaluation against donor travel radius
+    5. Scoring:
+       - Compatibility: 40 points
+       - Proximity: 30 points
+       - Recency & Eligibility: 20 points
+       - Donation History Reliability: 10 points
     """
     req_group = request.get("blood_group", "")
     req_comp = request.get("blood_component", "Whole Blood")
-    req_lat = request.get("latitude", 40.7128)
-    req_lon = request.get("longitude", -74.0060)
+    req_lat = request.get("latitude")
+    req_lon = request.get("longitude")
 
-    results = []
+    ranked_results = []
 
     for d in donors:
         donor_group = d.get("blood_group", "")
-
-        # 1. Hard compatibility filter
+        # Step 1: Hard clinical compatibility
         if not is_clinically_compatible(donor_group, req_group, req_comp):
             continue
 
-        # 2. Availability filter
-        is_avail = d.get("is_available", True)
-        if not is_avail:
+        # Step 2: Consent and availability
+        if not d.get("is_available", False) or not d.get("consent_emergency_alerts", True):
             continue
 
-        # 3. Calculate distance
-        d_lat = d.get("latitude", 40.7150)
-        d_lon = d.get("longitude", -74.0020)
+        # Step 3: Medical interval check
+        last_date = d.get("last_donation_date")
+        is_eligible, days_elapsed, interval_msg = check_donor_interval_eligibility(last_date, req_comp)
+        if not is_eligible:
+            continue
+
+        # Step 4: Distance calculation
+        d_lat = d.get("latitude")
+        d_lon = d.get("longitude")
         radius = d.get("travel_radius_km", 25)
 
-        distance_km = calculate_haversine_distance(req_lat, req_lon, d_lat, d_lon) if req_lat and d_lat else 3.0
-        if distance_km > radius:
-            continue
+        distance_km = None
+        if req_lat is not None and req_lon is not None and d_lat is not None and d_lon is not None:
+            distance_km = calculate_haversine_distance(req_lat, req_lon, d_lat, d_lon)
+            if distance_km > radius:
+                # Outside donor's consented travel radius
+                continue
 
-        # 4. Transparent Scoring: 50% Proximity + 30% Availability + 20% Response Suitability
-        # Proximity score (0-50 pts)
-        prox_score = round(max(5.0, 50.0 * (1.0 - min(distance_km / max(radius, 1), 1.0))), 1)
+        # Step 5: Explainable transparent scoring
+        score_breakdown = []
+        total_score = 0.0
 
-        # Availability score (0-30 pts)
-        avail_score = 30.0 if is_avail else 0.0
+        # Factor A: Compatibility (max 40)
+        if donor_group == req_group:
+            comp_score = 40.0
+            comp_reason = f"Exact blood group match ({donor_group})"
+        else:
+            comp_score = 35.0
+            comp_reason = f"Clinically compatible group ({donor_group} for {req_group} {req_comp})"
+        total_score += comp_score
+        score_breakdown.append({"factor": "Clinical Compatibility", "points": comp_score, "max": 40, "details": comp_reason})
 
-        # Response suitability score (0-20 pts)
+        # Factor B: Geographic Proximity (max 30)
+        if distance_km is not None:
+            prox_score = max(5.0, round(30.0 * max(0.0, 1.0 - (distance_km / max(radius, 1))), 1))
+            prox_reason = f"Distance ~{distance_km} km (within {radius} km limit)"
+        else:
+            prox_score = 15.0
+            prox_reason = "Manual city match without exact GPS coordinate"
+        total_score += prox_score
+        score_breakdown.append({"factor": "Proximity", "points": prox_score, "max": 30, "details": prox_reason})
+
+        # Factor C: Eligibility & Cooldown (max 20)
+        elig_score = 20.0
+        total_score += elig_score
+        score_breakdown.append({"factor": "Interval Eligibility", "points": elig_score, "max": 20, "details": interval_msg})
+
+        # Factor D: Reliability & Previous Donations (max 10)
         total_donations = d.get("total_donations", 0)
-        suitability_score = round(min(20.0, 10.0 + min(total_donations, 5) * 2.0), 1)
-
-        total_score = round(prox_score + avail_score + suitability_score, 1)
-
-        reasons = [
-            {"factor": "Proximity (50% max)", "points": prox_score, "details": f"~{distance_km} km away (within {radius} km radius)"},
-            {"factor": "Availability (30% max)", "points": avail_score, "details": "Active and consented for emergency alerts"},
-            {"factor": "Response Suitability (20% max)", "points": suitability_score, "details": f"{total_donations} verified prior completed donations"},
-        ]
-
-        results.append({
-            "donor_id": d.get("id"),
-            "donor_name": d.get("donor_name", "Volunteer Donor"),
-            "blood_group": donor_group,
-            "city": d.get("city", "New York"),
-            "distance_km": distance_km,
-            "match_score": total_score,
-            "match_reasons": reasons,
-            "algorithm": "Prototype matching: 50% proximity, 30% availability, 20% response suitability",
-            "disclaimer": "Prototype demo matching algorithm. Not a clinically validated medical algorithm."
+        rel_score = min(10.0, round(2.0 + min(total_donations, 8) * 1.0, 1))
+        total_score += rel_score
+        score_breakdown.append({
+            "factor": "History & Experience",
+            "points": rel_score,
+            "max": 10,
+            "details": f"{total_donations} verified successful prior donations"
         })
 
-    # Sort descending by match score
-    results.sort(key=lambda x: -x["match_score"])
-    return results
+        ranked_results.append({
+            "donor_id": d.get("id"),
+            "user_id": d.get("user_id"),
+            "donor_name": d.get("donor_name", "Consented Donor"),
+            "blood_group": donor_group,
+            "city": d.get("city"),
+            "area": d.get("area"),
+            "distance_km": distance_km,
+            "total_donations": total_donations,
+            "match_score": round(total_score, 1),
+            "reasons": score_breakdown,
+            "clinical_disclaimer": "AI ranking does not replace pre-donation clinical screening by medical professionals."
+        })
+
+    # Sort descending by match_score, then ascending by distance
+    ranked_results.sort(key=lambda x: (-x["match_score"], x["distance_km"] if x["distance_km"] is not None else 999))
+    return ranked_results
+
+# Backward-compatibility alias
+rank_donor_candidates_prototype = rank_donor_candidates

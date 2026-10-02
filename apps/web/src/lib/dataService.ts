@@ -1,5 +1,7 @@
-import { supabase, isSupabaseConfigured } from './supabase';
+import { supabase, isSupabaseConfigured as rawConfigured } from './supabase';
 import { appStorage } from './storage';
+
+const isSupabaseConfigured = rawConfigured && import.meta.env.MODE !== 'test';
 import {
   BloodRequest,
   DonorMatch,

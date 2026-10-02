@@ -1,13 +1,14 @@
 """Tests for BloodLink AI Engine matching and forecasting logic."""
 
 import pytest
-from app.models.matching import (
+import datetime
+from matching import (
     is_clinically_compatible,
     calculate_haversine_distance,
     check_donor_interval_eligibility,
     rank_donor_candidates
 )
-from app.models.forecaster import (
+from forecasting import (
     train_and_forecast_demand,
     generate_synthetic_historical_demand
 )
@@ -41,7 +42,6 @@ def test_donor_cooldown_eligibility():
     assert eligible is True
 
     # Recent donation (5 days ago) should be ineligible for Whole Blood (requires 56 days)
-    import datetime
     recent_date = (datetime.date.today() - datetime.timedelta(days=5)).strftime("%Y-%m-%d")
     eligible, days, _ = check_donor_interval_eligibility(recent_date, "Whole Blood")
     assert eligible is False

@@ -1,7 +1,10 @@
 import { BloodGroup, BloodComponent, DemandForecastResult, DonorMatch, BloodRequest, DonorProfile } from '../types';
 import { rankCandidateDonorsLocally } from './clinicalCompatibility';
 
-const AI_SERVICE_BASE = import.meta.env.VITE_AI_SERVICE_URL || 'http://localhost:8000';
+const AI_SERVICE_BASE = 
+  import.meta.env.VITE_AI_SERVICE_URL !== undefined && import.meta.env.VITE_AI_SERVICE_URL !== ''
+    ? import.meta.env.VITE_AI_SERVICE_URL
+    : (import.meta.env.DEV ? 'http://localhost:8000' : '');
 
 export async function checkAiServiceHealth(): Promise<boolean> {
   try {
