@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
-    "ai-service": {
+    "api": {
       "root": "ai-service",
       "framework": "fastapi"
     },
@@ -11,7 +11,7 @@
       "bindings": [
         {
           "type": "service",
-          "service": "ai-service",
+          "service": "api",
           "format": "url",
           "env": "AI_SERVICE_URL"
         }
@@ -22,13 +22,13 @@
     {
       "source": "/api/v1/(.*)",
       "destination": {
-        "service": "ai-service"
+        "service": "api"
       }
     },
     {
       "source": "/health",
       "destination": {
-        "service": "ai-service"
+        "service": "api"
       }
     },
     {
