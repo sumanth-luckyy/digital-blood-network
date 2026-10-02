@@ -1,0 +1,16 @@
+{
+  "name": "bhagavn-bloodlink",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Digital Blood Donation Emergency Network (BloodLink)",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm --prefix apps/web run dev",
+    "build": "npm --prefix apps/web run build",
+    "test": "npm --prefix apps/web run test",
+    "lint": "npm --prefix apps/web run lint",
+    "preview": "npm --prefix apps/web run preview"
+  }
+}
